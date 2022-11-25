@@ -1,0 +1,122 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: "Stack para provisionar uma app na subnet privada com exemplo de referencia com outra stack"
+
+# Esse template cria:
+#   Amazon EC2 instance
+#   Security Group
+
+######################
+# Parameters
+######################
+
+Parameters:
+  NetworkStackName:
+    Description: "Nome da Stack do Cloudformation com os recursos de rede"
+    Type: String
+    MinLength: 1
+    Maxlength: 255
+    AllowedPattern: '^[a-zA-Z][-a-zA-Z0-9]*$'
+    Default: NetworkVPC
+
+  AmazonLinuxAMIID:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::ID>
+    Default: /aws/service/ami-amazon-linux-latest/amzn2-ami-hvm-x86_64-gp2
+
+######################
+# Resources
+######################
+
+Resources:
+
+  WebServerIntance: #nome da instancia EC2
+    Type: AWS::EC2::Instance
+    Metadata:
+      'AWS::CloudFormation::Init': #consiguindo passar um set de configuração
+        configSets: #lista de configuração
+          All:
+            - ConfigureSampleApp #chamando o primeiro item a ser configurado
+        ConfigureSampleApp:
+          packages:
+            yum: #instalador e gerenciador de pacotes
+              httpd: [] #instalar o apache
+          files:
+            /var/www/html/index.html: #arquivo root do apache
+              content: |
+                <img src="https://s3.amazonaws.com/cloudformation-examples/cloudformation_graphic.png" alt="AWS CloudFormation Logo"/>
+                <h1>Parabens!!! Voce conseguiu subir a aplicação atraves do Cloudformation.</h1>
+              mode: 000644 # dados de permissionamento 
+              owner: apache # dados de permissionamento 
+              group: apache # dados de permissionamento 
+          services:
+            sysvinit:
+              httpd:
+                enabled: true # ativo assim que a maquina ligar
+                ensureRunning: true # garantir que esteja startado e funcionando
+    Properties:
+      InstanceType: t2.micro
+      ImageId: !Ref AmazonLinuxAMIID
+      NetworkInterfaces:
+        - GroupSet:
+            - !Ref WebServerSecurityGroup #Chamando o security group que sera criada la embaixo
+          AssociatePublicIpAddress: true
+          DeviceIndex: 0
+          DeleteOnTermination: true
+          SubnetId:
+            Fn::ImportValue:
+              !Sub us-east-1-${NetworkStackName}-PublicSubnet0 #conectando a subnet publica da outra stack VPC
+      Tags:
+        - Key: Name
+          Value: Web Server
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash -xe
+          yum update -y aws-cfn-bootstrap
+          # Install the files and packages from the metadata
+          /opt/aws/bin/cfn-init -v --stack ${AWS::StackName} --resource WebServerInstance --configsets All --region ${AWS::Region}
+          # Signal the status from cfn-init
+          /opt/aws/bin/cfn-signal -e $? --stack ${AWS::StackName} --resource WebServerInstance --region ${AWS::Region}
+    CreationPolicy:
+      ResourceSignal:
+        Timeout: PT5M
+
+  DiskVolume:
+    Type: AWS::EC2::Volume
+    Properties:
+      Size: 100
+      AvailabilityZone: !GetAll WebServerIntance.AvailabilityZone
+      Tags:
+        - Key: Name
+          Value: Web Data
+    DeletionPolicy: Snapshot
+
+  DiskMountPoint:
+    Type: AWS::EC2::VolumeAttachment
+    Properties:
+      InstanceId: !Ref WebServerInstance
+      VolumeId: !Ref DiskVolume
+      Device: /dev/sdh
+
+  WebServerSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Enable HTTP ingress
+      VpcId:
+        Fn::ImportVAlue:
+          !Sub us-east-1-${NetworkStackName}-VPC #conectando a vpc da outra stack VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: Web Server Security Group
+
+######################
+# Outputs section
+######################
+
+Outputs:
+  URL:
+    Description: URL of the sample Website
+    Value: !Sub 'http://${WebServerIntance.PublicDnsName}'
